@@ -1,0 +1,73 @@
+WITH base AS (
+    SELECT
+        PJJ AS id_contract,
+        BUCKET_AWAL,
+        BUCKET_AKHIR
+    FROM "IMFI"."PUBLIC"."MONITORING"
+    WHERE dateadd('day',TGL_JATUH_TEMPO,'1899-12-30') IS NOT NULL
+    AND JENIS_KENDARAAN IN ('R2','R4') 
+    AND STATUS_KONSUMEN <> 'PELUNASAN'
+)
+SELECT
+    BUCKET_AWAL,
+    BUCKET_AKHIR,
+    COUNT(DISTINCT id_contract) AS jumlah_kontrak,
+    
+    -- total per bucket awal
+    SUM(COUNT(DISTINCT id_contract)) OVER (PARTITION BY BUCKET_AWAL) AS total_bucket_awal,
+    
+    -- flow rate
+    COUNT(DISTINCT id_contract) * 1.0
+    / SUM(COUNT(DISTINCT id_contract)) OVER (PARTITION BY BUCKET_AWAL) 
+    AS flow_rate
+
+FROM base
+GROUP BY BUCKET_AWAL, BUCKET_AKHIR
+ORDER BY BUCKET_AWAL, BUCKET_AKHIR
+
+
+--------------------------------------
+with base as (
+select
+PJJ id_contract,
+initcap(NAMA) nama_debitur,
+SISA_PIUTANG outstanding,
+SIPOK_AWAL hutang_pokok,
+SIPOK_AKHIR hutang_akhir,
+ANGSURAN_TERTUNGGAK angs_tertunggak,
+JUMLAH_ANGSURAN_TERTUNGGAK angs_tertunggak_ke,
+TOTAL_DENDA denda,
+OD_AWAL,
+---Jumlah hari keterlambatan yang tercatat sekarang
+OVD,
+BUCKET_DAILY,
+BUCKET_AWAL,
+BUCKET_AKHIR
+from "IMFI"."PUBLIC"."MONITORING"
+),
+bucket as (
+select
+BUCKET_AWAL,
+BUCKET_AKHIR,
+round (sum (outstanding),2) total_outs
+from base
+group by 1,2
+),
+flow_ra as (
+select*,
+sum(total_outs) over (partition by BUCKET_AWAL) total_outs_awal,
+round (total_outs*1.0/nullif(sum(total_outs) over (partition by BUCKET_AWAL),0),2) flow_rate
+from bucket
+)
+select*,
+round(flow_rate * 100, 2) || '%' as flow_rate_pct
+from flow_ra order by BUCKET_AWAL;
+
+
+
+
+
+
+
+
+)
