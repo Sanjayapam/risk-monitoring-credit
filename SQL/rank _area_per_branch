@@ -1,0 +1,133 @@
+with base_clean as(
+select
+"Kode Cab. Induk" kode_cab_induk,
+initcap (AREA) area,
+"Kode Cab. Asal" kode_cabang,
+initcap(split_part(NAMA_CABANG,' - CAB. ',2)) cabang,
+concat_ws('-',"Kode Cab. Asal", PJJ) id_contract,
+dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') tgl_jatuh_tempo,
+"% DP" persentase_dp,
+case when "% DP" < 15 then 'DP very low'
+when "% DP" < 20 then 'DP low'
+when "% DP" < 40 then 'DP medium'
+when "% DP" < 50 then 'DP high'
+else 'DP very high' end as kategori_DP,
+TENOR_KONTRAK tenor,
+CASE 
+    WHEN tenor <= 12 THEN '1-12 bulan'
+    WHEN tenor <= 24 THEN '13-24 bulan'
+    WHEN tenor <= 36 THEN '25-36 bulan'
+    WHEN tenor <= 48 THEN '37-48 bulan'
+    WHEN tenor <= 60 THEN '49-60 bulan'
+    WHEN tenor <= 84 THEN '61-84 bulan'
+    ELSE '>84 bulan'
+END AS kategori_tenor,
+"Angs ke - awal" angs_ke,
+SISA_ANGS sisa_angs_ke,
+NILAI_ANGSURAN angsuran,
+SISA_PIUTANG sisa_piutang,
+SIPOK_AWAL hutang_pokok,
+SIPOK_AKHIR hutang_akhir,
+ANGSURAN_TERTUNGGAK angs_tertunggak,
+TOTAL_DENDA denda,
+CARA_BAYAR_AWAL,
+(case when CARA_BAYAR_TERAKHIR = '-' then 'None' else CARA_BAYAR_TERAKHIR end) cara_bayar_terakhir,
+coalesce (KETERANGAN_CARA_BAYAR, 'None') ket_cara_bayar,
+case when TGL_BAYAR_TERAKHIR = '-' then null else dateadd ('day',TGL_BAYAR_TERAKHIR,'1899-12-30') end as tgl_bayar_terakhir,
+case when TGL_KASIR = '-' then null else dateadd ('day',TGL_KASIR,'1899-12-30') end as tgl_kasir,
+NIK_KOLEKTOR,
+KOLEKTOR,
+"NIK AO/CMO" nik_ao_cmo,
+"AO/CMO" ao_cmo,
+---Jumlah hari keterlambatan pada saat data ini mulai ditarik (misal: awal bulan).
+OD_AWAL,
+---Jumlah hari keterlambatan yang tercatat sekarang
+OVD,
+BUCKET_DAILY,
+BUCKET_AWAL,
+BUCKET_AKHIR,
+--- status akhir bulan ex flow, stay
+STATUS_EOM,
+STATUS_BAYAR,
+STATUS_KONSUMEN,
+JENIS_KENDARAAN jenis_produk,
+KONDISI_KENDARAAN,
+MERK_KENDARAAN nama_produk,
+KETERANGAN_KENDARAAN merk_produk,
+TAHUN_KENDARAAN,
+case when NO_POLISI in ('L5635DAX','-','0') then 'Undentified' else NO_POLISI end as plat_kendaraan,
+KODE_DEALER,
+NAMA_DEALER,
+STATUS_BPKB,
+BULAN_PENCAIRAN,
+TAHUN_PENCAIRAN,
+concat_ws('-',BULAN_PENCAIRAN,TAHUN_PENCAIRAN) pencairan_date,
+STATUS_PENCAIRAN,
+--Setiap kali nasabah bayar (NILAI_PEMBAYARAN)
+PENGHASILAN_BERSIH,
+HARGA_OTR
+from "IMFI"."PUBLIC"."MONITORING"
+where dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') is not null
+and JENIS_KENDARAAN in ('R2','R4') and KONDISI_KENDARAAN = 'BARU'
+and STATUS_KONSUMEN <> 'PELUNASAN'
+),
+features as (
+select*,
+case when angs_ke = 1 and OVD > 30 then 1 else 0 end as fpd,
+case when OVD > 120 then 1 else 0 end as default_contract, 
+case when OVD = 0 then 'current'
+when OVD > 30 then 'bucket 30+'
+when OVD > 60 then 'bucket 60+'
+else 'NPL'end as flag_bucket,
+case when kategori_DP in ('DP low','DP very low') and tenor >= 24 then 1 else 0 end as risk_agunan,
+round (hutang_pokok/nullif(harga_otr,0),2) ltv,
+round (angsuran/nullif(penghasilan_bersih,0),2) dsr,
+round (coalesce (denda,0)/nullif(angs_tertunggak,0),2) rasio_beban_denda
+from base_clean,
+),
+agg_area as (
+select
+kode_cab_induk,
+area,
+count (distinct id_contract) jml_debitur,
+round (sum (default_contract)/count (distinct id_contract)*100,2) default_rate,
+sum (fpd) total_fpd,
+sum (case when flag_bucket = 'NPL' then 1 else 0 end) total_NPL,
+sum (risk_agunan) total_lowdplongtenor,
+round (avg (ltv),2) avg_ltv,
+round (avg (dsr),2) avg_dsr,
+round (avg(rasio_beban_denda),2) avg_rasio_beban_denda
+from features
+group by 1,2
+),
+topbad_tenarea as (
+select*,
+dense_rank() over (order by default_rate desc) rank_area
+from agg_area
+),
+bad_branch as (
+select
+b.kode_cab_induk,
+b.area,
+f.kode_cabang,
+f.cabang,
+count (distinct f.id_contract) jml_debitur,
+round (sum (f.default_contract)/count (distinct id_contract)*100,2) default_rate,
+sum (f.fpd) total_fpd,
+sum (case when f.flag_bucket = 'NPL' then 1 else 0 end) total_NPL,
+round(avg (f.sisa_piutang),2) sipok,
+round(avg (f.angs_tertunggak),2) angs_nunggak,
+round(avg (f.denda),2) avg_denda,
+sum (f.risk_agunan) total_lowdplongtenor,
+round (avg (f.ltv),2) avg_ltv,
+round (avg (f.dsr),2) avg_dsr,
+round (avg(f.rasio_beban_denda),2) avg_rasio_beban_denda
+from features f
+left join topbad_tenarea b
+on f.kode_cab_induk = b.kode_cab_induk
+where b.rank_area <= 10
+group by 1,2,3,4
+)
+select*,
+dense_rank() over (partition by area order by default_rate desc) rank_branch
+from bad_branch;
