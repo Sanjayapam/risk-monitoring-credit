@@ -1,0 +1,201 @@
+with base_clean as (
+select
+"Kode Cab. Induk" kode_cab_induk,
+initcap (AREA) area,
+"Kode Cab. Asal" kode_cabang,
+initcap(split_part(NAMA_CABANG,' - CAB. ',2)) cabang,
+PJJ id_contract,
+initcap(NAMA) nama_debitur,
+initcap(JENIS_PIUTANG) jenis_piutang,
+concat_ws(', ', KEL, KEC, KOTA, KODE_POS) address,
+dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') tgl_jatuh_tempo,
+"% DP" persentase_dp,
+case when "% DP" < 15 then 'DP very low'
+when "% DP" < 20 then 'DP low'
+when "% DP" < 40 then 'DP medium'
+when "% DP" < 50 then 'DP high'
+else 'DP very high' end as kategori_DP,
+TENOR_KONTRAK tenor,
+CASE 
+    WHEN tenor <= 12 THEN '1-12 bulan'
+    WHEN tenor <= 24 THEN '13-24 bulan'
+    WHEN tenor <= 36 THEN '25-36 bulan'
+    WHEN tenor <= 48 THEN '37-48 bulan'
+    WHEN tenor <= 60 THEN '49-60 bulan'
+    WHEN tenor <= 84 THEN '61-84 bulan'
+    ELSE '>84 bulan'
+END AS kategori_tenor,
+"Angs ke - awal" angs_ke,
+SISA_ANGS sisa_angs_ke,
+NILAI_ANGSURAN angsuran,
+SISA_PIUTANG sisa_piutang,
+SIPOK_AWAL hutang_pokok,
+SIPOK_AKHIR hutang_akhir,
+ANGSURAN_TERTUNGGAK angs_tertunggak,
+JUMLAH_ANGSURAN_TERTUNGGAK angs_tertunggak_ke,
+TOTAL_DENDA denda,
+NIK_KOLEKTOR,
+KOLEKTOR,
+"NIK AO/CMO" nik_ao_cmo,
+"AO/CMO" ao_cmo,
+---Jumlah hari keterlambatan pada saat data ini mulai ditarik (misal: awal bulan).
+OD_AWAL,
+---Jumlah hari keterlambatan yang tercatat sekarang
+OVD,
+BUCKET_DAILY,
+BUCKET_AWAL,
+BUCKET_AKHIR,
+--- status akhir bulan ex flow, stay
+STATUS_EOM,
+STATUS_BAYAR,
+STATUS_KONSUMEN,
+JENIS_KENDARAAN jenis_produk,
+KONDISI_KENDARAAN,
+MERK_KENDARAAN nama_produk,
+KETERANGAN_KENDARAAN merk_produk,
+TAHUN_KENDARAAN,
+case when NO_POLISI in ('L5635DAX','-','0') then 'Undentified' else NO_POLISI end as plat_kendaraan,
+KODE_DEALER,
+NAMA_DEALER,
+STATUS_BPKB,
+BULAN_PENCAIRAN,
+TAHUN_PENCAIRAN,
+concat_ws('-',BULAN_PENCAIRAN,TAHUN_PENCAIRAN) pencairan_date,
+STATUS_PENCAIRAN,
+--Setiap kali nasabah bayar (NILAI_PEMBAYARAN)
+NILAI_PEMBAYARAN,
+---KEWAJIBAN_POKOK: Uang yang digunakan untuk mengurangi hutang asli.
+KEWAJIBAN_POKOK,
+---KEWAJIBAN_BUNGA: Keuntungan untuk pihak pembiayaan (leasing/bank).
+KEWAJIBAN_BUNGA,
+--KEWAJIBAN sama dengan REALISASI. Artinya, pada baris-baris ini, nasabah membayar lunas tagihannya (tidak mencicil sebagian).
+REALISASI_POKOK,
+REALISASI_BUNGA,
+PENGHASILAN_BERSIH,
+HARGA_OTR,
+KATEGORI_OTR,
+JNS_PRODUK jenis_kendaraan_produk,
+from "IMFI"."PUBLIC"."MONITORING"
+where dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') is not null
+and JENIS_KENDARAAN ='R2' and KONDISI_KENDARAAN = 'BARU'
+and STATUS_KONSUMEN <> 'PELUNASAN'
+),
+features as (
+select*,
+case when OVD = 0 then 'Current'
+when OVD <= 30 then 'Bucket 30'
+when OVD <= 60 then 'Bucket 60'
+else 'NPL' end as flag_bucket,
+case when OVD > 90 then 1 else 0 end as default_contract,
+coalesce (sisa_piutang,0)/nullif (hutang_pokok,0) outstanding_ratio,
+hutang_pokok/nullif (HARGA_OTR,0) ltv_ratio,
+angsuran/nullif(PENGHASILAN_BERSIH,0) installment_income_ratio
+from base_clean
+),
+marketing as (
+select kode_cabang,
+cabang,
+nik_ao_cmo NIK,
+ao_cmo AO_CMO,
+count (distinct id_contract) jml_debitur,
+count(case when flag_bucket = 'NPL' then 1 end) jml_NPL,
+round(avg (sisa_piutang),2) avg_sisa_piutang,
+round(avg (hutang_pokok),2) avg_hutang_pokok,
+round(avg (denda),2) avg_denda,
+round(avg(outstanding_ratio),2) avg_outstanding_ratio,
+round(avg (ltv_ratio),2) avg_ltv_ratio,
+round(avg(installment_income_ratio),2) avg_dsr,
+round(sum(default_contract)/count(distinct id_contract),2) default_rate
+from features
+group by 1,2,3,4
+)
+select*,
+dense_rank() over (partition by kode_cabang order by default_rate desc, avg_sisa_piutang desc) rank_marketing
+from marketing
+
+---------------------------------------------------------------------------------------------------------------------
+
+with base_clean as (
+    -- [Isi CTE base_clean sama dengan query Anda sebelumnya]
+    -- Pastikan menghapus koma terakhir sebelum FROM
+    select 
+        "Kode Cab. Induk" kode_cab_induk,
+        initcap (AREA) area,
+        "Kode Cab. Asal" kode_cabang,
+        initcap(split_part(NAMA_CABANG,' - CAB. ',2)) cabang,
+        PJJ id_contract,
+        SISA_PIUTANG sisa_piutang,
+        SIPOK_AWAL hutang_pokok,
+        NILAI_ANGSURAN angsuran,
+        PENGHASILAN_BERSIH,
+        HARGA_OTR,
+        OVD,
+        "NIK AO/CMO" nik_ao_cmo,
+        "AO/CMO" ao_cmo,
+        JENIS_KENDARAAN,
+        KONDISI_KENDARAAN,
+        STATUS_KONSUMEN,
+        TGL_JATUH_TEMPO
+    from "IMFI"."PUBLIC"."MONITORING"
+    where dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') is not null
+    and JENIS_KENDARAAN ='R2' and KONDISI_KENDARAAN = 'BARU'
+    and STATUS_KONSUMEN <> 'PELUNASAN'
+),
+features as (
+    select *,
+        case when OVD > 90 then 1 else 0 end as is_default,
+        coalesce(sisa_piutang,0)/nullif(hutang_pokok,0) outstanding_ratio,
+        hutang_pokok/nullif(HARGA_OTR,0) ltv_ratio,
+        angsuran/nullif(PENGHASILAN_BERSIH,0) installment_income_ratio
+    from base_clean
+),
+cabang_performance as (
+    -- Tahap 1: Hitung Default Rate per Cabang untuk cari Top 5 Terburuk
+    select 
+        kode_cabang,
+        cabang,
+        sum(is_default) * 1.0 / count(distinct id_contract) as branch_default_rate,
+        dense_rank() over (order by sum(is_default) * 1.0 / count(distinct id_contract) desc) as rank_cabang_terburuk
+    from features
+    group by 1, 2
+),
+marketing_performance as (
+    -- Tahap 2: Hitung performa AO/CMO
+    select 
+        f.kode_cabang,
+        f.cabang,
+        f.nik_ao_cmo,
+        f.ao_cmo,
+        count(distinct f.id_contract) as total_debitur,
+        sum(f.is_default) as total_npl,
+        round(sum(f.is_default) * 100.0 / count(distinct f.id_contract), 2) as ao_default_rate_pct,
+        round(avg(f.ltv_ratio), 2) as avg_ltv,
+        round(avg(f.installment_income_ratio), 2) as avg_dsr
+    from features f
+    group by 1,2,3,4
+)
+-- Final Output: Gabungkan keduanya
+select 
+    cp.rank_cabang_terburuk,
+    mp.*
+from marketing_performance mp
+inner join cabang_performance cp on mp.kode_cabang = cp.kode_cabang
+where cp.rank_cabang_terburuk <= 5
+order by cp.rank_cabang_terburuk asc, mp.ao_default_rate_pct desc;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
