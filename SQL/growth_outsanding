@@ -1,0 +1,77 @@
+with base_clean as (
+select
+PJJ id_contract,
+initcap(NAMA) nama_debitur,
+"Angs ke - awal" angs_ke,
+SISA_ANGS sisa_angs_ke,
+NILAI_ANGSURAN angsuran,
+SISA_PIUTANG sisa_piutang,
+SIPOK_AWAL hutang_pokok,
+SIPOK_AKHIR hutang_akhir,
+ANGSURAN_TERTUNGGAK angs_tertunggak,
+JUMLAH_ANGSURAN_TERTUNGGAK angs_tertunggak_ke,
+TOTAL_DENDA denda,
+---Jumlah hari keterlambatan pada saat data ini mulai ditarik (misal: awal bulan).
+OD_AWAL,
+---Jumlah hari keterlambatan yang tercatat sekarang
+OVD,
+BUCKET_DAILY,
+BUCKET_AWAL,
+BUCKET_AKHIR,
+--- status akhir bulan ex flow, stay
+STATUS_EOM,
+STATUS_BAYAR,
+STATUS_KONSUMEN,
+JENIS_KENDARAAN jenis_produk,
+KONDISI_KENDARAAN,
+MERK_KENDARAAN nama_produk,
+BULAN_PENCAIRAN,
+TAHUN_PENCAIRAN,
+to_date(BULAN_PENCAIRAN || '/' ||TAHUN_PENCAIRAN, 'MM/YYYY') pencairan_date,
+STATUS_PENCAIRAN,
+--Setiap kali nasabah bayar (NILAI_PEMBAYARAN)
+NILAI_PEMBAYARAN,
+---KEWAJIBAN_POKOK: Uang yang digunakan untuk mengurangi hutang asli.
+KEWAJIBAN_POKOK,
+---KEWAJIBAN_BUNGA: Keuntungan untuk pihak pembiayaan (leasing/bank).
+KEWAJIBAN_BUNGA,
+--KEWAJIBAN sama dengan REALISASI. Artinya, pada baris-baris ini, nasabah membayar lunas tagihannya (tidak mencicil sebagian).
+REALISASI_POKOK,
+REALISASI_BUNGA,
+PENGHASILAN_BERSIH,
+HARGA_OTR
+from "IMFI"."PUBLIC"."MONITORING"
+where dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') is not null
+and JENIS_KENDARAAN = 'R2' and KONDISI_KENDARAAN = 'BARU'
+and STATUS_KONSUMEN <> 'PELUNASAN'
+),
+feature as (
+select*,
+case when OVD > 90 then 1 else null end as NPL,
+coalesce (angsuran,0)/nullif(PENGHASILAN_BERSIH,0) dsr,
+hutang_pokok/nullif(HARGA_OTR,0) ltv
+from base_clean
+),
+agg as (
+select
+pencairan_date,
+count(distinct id_contract) jml_debitur,
+count(NPL) jml_debitur_NPL,
+avg (dsr) ratio_dsr,
+avg (ltv) ratio_ltv,
+sum (hutang_pokok) total_hutang_pokok,
+sum (angs_tertunggak) total_angs_tertunggak,
+sum (sisa_piutang) total_sisa_hutang,
+lag (sum(sisa_piutang)) over (order by pencairan_date) prev_sipok,
+round(count(NPL)/count(distinct id_contract)*100,2) default_rate
+from feature group by 1
+),
+growth as (
+select*,
+round((total_sisa_hutang - prev_sipok)/nullif (prev_sipok,0)*100,2) growth_MoM
+from agg
+)
+select*,
+dense_rank() over (order by default_rate desc) rank_default
+from growth
+order by 1
