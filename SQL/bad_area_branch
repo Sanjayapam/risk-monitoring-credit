@@ -1,0 +1,290 @@
+------------Cleansing & Tranform Data-------------------
+
+with base_clean as (
+select
+"Kode Cab. Induk" kode_cab_induk,
+initcap (AREA) area,
+"Kode Cab. Asal" kode_cabang,
+initcap(split_part(NAMA_CABANG,' - CAB. ',2)) cabang,
+PJJ id_contract,
+initcap(NAMA) nama_debitur,
+initcap(JENIS_PIUTANG) jenis_piutang,
+concat_ws(', ', KEL, KEC, KOTA, KODE_POS) address,
+dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') tgl_jatuh_tempo,
+"% DP" persentase_dp,
+case when "% DP" < 15 then 'DP very low'
+when "% DP" < 20 then 'DP low'
+when "% DP" < 40 then 'DP medium'
+when "% DP" < 50 then 'DP high'
+else 'DP very high' end as kategori_DP,
+TENOR_KONTRAK tenor,
+CASE 
+    WHEN tenor <= 12 THEN '1-12 bulan'
+    WHEN tenor <= 24 THEN '13-24 bulan'
+    WHEN tenor <= 36 THEN '25-36 bulan'
+    WHEN tenor <= 48 THEN '37-48 bulan'
+    WHEN tenor <= 60 THEN '49-60 bulan'
+    WHEN tenor <= 84 THEN '61-84 bulan'
+    ELSE '>84 bulan'
+END AS kategori_tenor,
+"Angs ke - awal" angs_ke,
+SISA_ANGS sisa_angs_ke,
+NILAI_ANGSURAN angsuran,
+SISA_PIUTANG sisa_piutang,
+SIPOK_AWAL hutang_pokok,
+SIPOK_AKHIR hutang_akhir,
+ANGSURAN_TERTUNGGAK angs_tertunggak,
+JUMLAH_ANGSURAN_TERTUNGGAK angs_tertunggak_ke,
+TOTAL_DENDA denda,
+CARA_BAYAR_AWAL,
+(case when CARA_BAYAR_TERAKHIR = '-' then 'None' else CARA_BAYAR_TERAKHIR end) cara_bayar_terakhir,
+coalesce (KETERANGAN_CARA_BAYAR, 'None') ket_cara_bayar,
+case when TGL_BAYAR_TERAKHIR = '-' then null else dateadd ('day',TGL_BAYAR_TERAKHIR,'1899-12-30') end as tgl_bayar_terakhir,
+case when TGL_KASIR = '-' then null else dateadd ('day',TGL_KASIR,'1899-12-30') end as tgl_kasir,
+case when PEKERJAAN = '-' then 'Unknown' else PEKERJAAN end as pekerjaan,
+BIDANG_USAHA,
+NIK_KOLEKTOR,
+KOLEKTOR,
+"NIK AO/CMO" nik_ao_cmo,
+"AO/CMO" ao_cmo,
+---Jumlah hari keterlambatan pada saat data ini mulai ditarik (misal: awal bulan).
+OD_AWAL,
+---Jumlah hari keterlambatan yang tercatat sekarang
+OVD,
+BUCKET_DAILY,
+BUCKET_AWAL,
+BUCKET_AKHIR,
+--- status akhir bulan ex flow, stay
+STATUS_EOM,
+STATUS_BAYAR,
+STATUS_KONSUMEN,
+JENIS_KENDARAAN jenis_produk,
+KONDISI_KENDARAAN,
+MERK_KENDARAAN nama_produk,
+KETERANGAN_KENDARAAN merk_produk,
+TAHUN_KENDARAAN,
+case when NO_POLISI in ('L5635DAX','-','0') then 'Undentified' else NO_POLISI end as plat_kendaraan,
+KODE_DEALER,
+NAMA_DEALER,
+STATUS_BPKB,
+BULAN_PENCAIRAN,
+TAHUN_PENCAIRAN,
+concat_ws('-',BULAN_PENCAIRAN,TAHUN_PENCAIRAN) pencairan_date,
+STATUS_PENCAIRAN,
+--Setiap kali nasabah bayar (NILAI_PEMBAYARAN)
+NILAI_PEMBAYARAN,
+---KEWAJIBAN_POKOK: Uang yang digunakan untuk mengurangi hutang asli.
+KEWAJIBAN_POKOK,
+---KEWAJIBAN_BUNGA: Keuntungan untuk pihak pembiayaan (leasing/bank).
+KEWAJIBAN_BUNGA,
+--KEWAJIBAN sama dengan REALISASI. Artinya, pada baris-baris ini, nasabah membayar lunas tagihannya (tidak mencicil sebagian).
+REALISASI_POKOK,
+REALISASI_BUNGA,
+PENGHASILAN_BERSIH,
+HARGA_OTR,
+KATEGORI_OTR,
+JNS_PRODUK jenis_kendaraan_produk,
+KODE_TYPE  transmisi_kendaraan,
+BAHAN_BAKAR,
+POLA_BUCKET,
+KETERANGAN_POLA_BUCKET,
+POLA_BAYAR
+from "IMFI"."PUBLIC"."MONITORING"
+where dateadd ('day',TGL_JATUH_TEMPO,'1899-12-30') is not null
+and JENIS_KENDARAAN in ('R2','R4') and KONDISI_KENDARAAN = 'BARU'
+and STATUS_KONSUMEN <> 'PELUNASAN'
+),
+flagging as (
+select*,
+case when OVD = 0 then 'Current'
+when OVD <= 30 then 'Bucket 30'
+when OVD <= 60 then 'Bucket 60'
+when OVD <= 90 then 'NPL'
+else 'Write Off' end as flag_bucket,
+case when OVD > 90 then 1 else 0 end as default_contract,
+coalesce (sisa_piutang,0)/nullif (hutang_pokok,0) outstanding_ratio,
+hutang_pokok/HARGA_OTR ltv_ratio,
+angsuran/nullif(PENGHASILAN_BERSIH,0) installment_income_ratio
+from base_clean
+),
+agg as (
+select
+area,
+concat_ws ('-',kode_cabang, cabang) branch,
+count (id_contract) total_debitur,
+sum(sisa_piutang) total_sisa_piutang,
+sum(hutang_pokok) total_hutang_pokok,
+sum(angs_tertunggak) total_angs_tertunggak,
+sum(denda) total_denda,
+sum (case when flag_bucket = 'Current' then 1 else 0 end) as Lancar,
+sum (case when flag_bucket in ('Bucket 30','Bucket 60') then 1 else 0 end) as Deliquency,
+sum (case when flag_bucket in ('NPL','Write Off') then 1 else 0 end) as Macet,
+round (avg(outstanding_ratio),2) avg_outstanding_ratio,
+round (avg(ltv_ratio),2) avg_ltv_ratio,
+round (avg(installment_income_ratio),2) dsr,
+round (sum (default_contract)/count (id_contract),2) default_rate
+from flagging
+group by 1,2
+)
+select*,
+CASE 
+        WHEN default_rate > 0.10 OR dsr > 50 THEN 'CRITICAL' -- Jika macet > 10% atau rata-rata cicilan > 50% gaji
+        WHEN default_rate BETWEEN 0.05 AND 0.10 THEN 'HIGH RISK' -- Macet 5% - 10%
+        WHEN default_rate BETWEEN 0.02 AND 0.05 THEN 'MEDIUM RISK' -- Macet 2% - 5%
+        ELSE 'LOW RISK' 
+    END AS risk_profile,
+dense_rank() over (partition by area order by total_angs_tertunggak/total_sisa_piutang desc, Macet desc, dsr desc, default_rate desc ) rank_risk
+from agg limit 100;
+
+
+
+------versi microsoft sql server-----------------------------------------
+WITH base_clean AS (
+    SELECT
+        [Kode Cab. Induk] AS kode_cab_induk,
+        -- SQL Server tidak punya INITCAP bawaan, biasanya menggunakan UPPER/LOWER 
+        -- atau membiarkannya jika collations tidak sensitif.
+        UPPER(LEFT(AREA, 1)) + LOWER(SUBSTRING(AREA, 2, LEN(AREA))) AS area,
+        [Kode Cab. Asal] AS kode_cabang,
+        -- Simulasi split_part(NAMA_CABANG,' - CAB. ',2)
+        LTRIM(RTRIM(SUBSTRING(NAMA_CABANG, CHARINDEX(' - CAB. ', NAMA_CABANG) + 8, LEN(NAMA_CABANG)))) AS cabang,
+        PJJ AS id_contract,
+        NAMA AS nama_debitur,
+        JENIS_PIUTANG AS jenis_piutang,
+        CONCAT_WS(', ', KEL, KEC, KOTA, KODE_POS) AS address,
+        DATEADD(day, CAST(TGL_JATUH_TEMPO AS INT), '1899-12-30') AS tgl_jatuh_tempo,
+        [% DP] AS persentase_dp,
+        CASE 
+            WHEN [% DP] < 15 THEN 'DP very low'
+            WHEN [% DP] < 20 THEN 'DP low'
+            WHEN [% DP] < 40 THEN 'DP medium'
+            WHEN [% DP] < 50 THEN 'DP high'
+            ELSE 'DP very high' 
+        END AS kategori_DP,
+        TENOR_KONTRAK AS tenor,
+        CASE 
+            WHEN tenor <= 12 THEN '1-12 bulan'
+            WHEN tenor <= 24 THEN '13-24 bulan'
+            WHEN tenor <= 36 THEN '25-36 bulan'
+            WHEN tenor <= 48 THEN '37-48 bulan'
+            WHEN tenor <= 60 THEN '49-60 bulan'
+            WHEN tenor <= 84 THEN '61-84 bulan'
+            ELSE '>84 bulan'
+        END AS kategori_tenor,
+        [Angs ke - awal] AS angs_ke,
+        SISA_ANGS AS sisa_angs_ke,
+        NILAI_ANGSURAN AS angsuran,
+        SISA_PIUTANG AS sisa_piutang,
+        SIPOK_AWAL AS hutang_pokok,
+        SIPOK_AKHIR AS hutang_akhir,
+        ANGSURAN_TERTUNGGAK AS angs_tertunggak,
+        JUMLAH_ANGSURAN_TERTUNGGAK AS angs_tertunggak_ke,
+        TOTAL_DENDA AS denda,
+        CARA_BAYAR_AWAL,
+        CASE WHEN CARA_BAYAR_TERAKHIR = '-' THEN 'None' ELSE CARA_BAYAR_TERAKHIR END AS cara_bayar_terakhir,
+        ISNULL(KETERANGAN_CARA_BAYAR, 'None') AS ket_cara_bayar,
+        CASE 
+            WHEN TGL_BAYAR_TERAKHIR = '-' THEN NULL 
+            ELSE DATEADD(day, CAST(TGL_BAYAR_TERAKHIR AS INT), '1899-12-30') 
+        END AS tgl_bayar_terakhir,
+        CASE 
+            WHEN TGL_KASIR = '-' THEN NULL 
+            ELSE DATEADD(day, CAST(TGL_KASIR AS INT), '1899-12-30') 
+        END AS tgl_kasir,
+        CASE WHEN PEKERJAAN = '-' THEN 'Unknown' ELSE PEKERJAAN END AS pekerjaan,
+        BIDANG_USAHA,
+        NIK_KOLEKTOR,
+        KOLEKTOR,
+        [NIK AO/CMO] AS nik_ao_cmo,
+        [AO/CMO] AS ao_cmo,
+        OD_AWAL,
+        OVD,
+        BUCKET_DAILY,
+        BUCKET_AWAL,
+        BUCKET_AKHIR,
+        STATUS_EOM,
+        STATUS_BAYAR,
+        STATUS_KONSUMEN,
+        JENIS_KENDARAAN AS jenis_produk,
+        KONDISI_KENDARAAN,
+        MERK_KENDARAAN AS nama_produk,
+        KETERANGAN_KENDARAAN AS merk_produk,
+        TAHUN_KENDARAAN,
+        CASE WHEN NO_POLISI IN ('L5635DAX', '-', '0') THEN 'Undentified' ELSE NO_POLISI END AS plat_kendaraan,
+        KODE_DEALER,
+        NAMA_DEALER,
+        STATUS_BPKB,
+        BULAN_PENCAIRAN,
+        TAHUN_PENCAIRAN,
+        CONCAT(BULAN_PENCAIRAN, '-', TAHUN_PENCAIRAN) AS pencairan_date,
+        STATUS_PENCAIRAN,
+        NILAI_PEMBAYARAN,
+        KEWAJIBAN_POKOK,
+        KEWAJIBAN_BUNGA,
+        REALISASI_POKOK,
+        REALISASI_BUNGA,
+        PENGHASILAN_BERSIH,
+        HARGA_OTR,
+        KATEGORI_OTR,
+        JNS_PRODUK AS jenis_kendaraan_produk,
+        KODE_TYPE AS transmisi_kendaraan,
+        BAHAN_BAKAR,
+        POLA_BUCKET,
+        KETERANGAN_POLA_BUCKET,
+        POLA_BAYAR
+    FROM [IMFI].[PUBLIC].[MONITORING]
+    WHERE DATEADD(day, CAST(TGL_JATUH_TEMPO AS INT), '1899-12-30') IS NOT NULL
+      AND JENIS_KENDARAAN IN ('R2', 'R4') 
+      AND KONDISI_KENDARAAN = 'BARU'
+      AND STATUS_KONSUMEN <> 'PELUNASAN'
+),
+flagging AS (
+    SELECT *,
+        CASE 
+            WHEN OVD = 0 THEN 'Current'
+            WHEN OVD <= 30 THEN 'Bucket 30'
+            WHEN OVD <= 60 THEN 'Bucket 60'
+            WHEN OVD <= 90 THEN 'NPL'
+            ELSE 'Write Off' 
+        END AS flag_bucket,
+        CASE WHEN OVD > 90 THEN 1 ELSE 0 END AS default_contract,
+        CAST(ISNULL(sisa_piutang, 0) AS FLOAT) / NULLIF(hutang_pokok, 0) AS outstanding_ratio,
+        CAST(hutang_pokok AS FLOAT) / NULLIF(HARGA_OTR, 0) AS ltv_ratio,
+        CAST(angsuran AS FLOAT) / NULLIF(PENGHASILAN_BERSIH, 0) AS installment_income_ratio
+    FROM base_clean
+),
+agg AS (
+    SELECT
+        area,
+        CONCAT(kode_cabang, '-', cabang) AS branch,
+        COUNT(id_contract) AS total_debitur,
+        SUM(sisa_piutang) AS total_sisa_piutang,
+        SUM(hutang_pokok) AS total_hutang_pokok,
+        SUM(angs_tertunggak) AS total_angs_tertunggak,
+        SUM(denda) AS total_denda,
+        SUM(CASE WHEN flag_bucket = 'Current' THEN 1 ELSE 0 END) AS Lancar,
+        SUM(CASE WHEN flag_bucket IN ('Bucket 30', 'Bucket 60') THEN 1 ELSE 0 END) AS Deliquency,
+        SUM(CASE WHEN flag_bucket IN ('NPL', 'Write Off') THEN 1 ELSE 0 END) AS Macet,
+        ROUND(AVG(outstanding_ratio), 2) AS avg_outstanding_ratio,
+        ROUND(AVG(ltv_ratio), 2) AS avg_ltv_ratio,
+        ROUND(AVG(installment_income_ratio), 2) AS dsr,
+        ROUND(CAST(SUM(default_contract) AS FLOAT) / COUNT(id_contract), 2) AS default_rate
+    FROM flagging
+    GROUP BY area, kode_cabang, cabang
+)
+SELECT TOP 100 
+    *,
+    CASE  
+        WHEN default_rate > 0.10 OR dsr > 0.50 THEN 'CRITICAL' -- DSR > 0.50 (karena rasio desimal)
+        WHEN default_rate BETWEEN 0.05 AND 0.10 THEN 'HIGH RISK' 
+        WHEN default_rate BETWEEN 0.02 AND 0.05 THEN 'MEDIUM RISK' 
+        ELSE 'LOW RISK'  
+    END AS risk_profile,
+    DENSE_RANK() OVER (
+        PARTITION BY area 
+        ORDER BY (total_angs_tertunggak / NULLIF(total_sisa_piutang, 0)) DESC, 
+                 Macet DESC, 
+                 dsr DESC, 
+                 default_rate DESC
+    ) AS rank_risk
+FROM agg;
